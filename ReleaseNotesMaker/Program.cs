@@ -281,6 +281,7 @@ namespace ReleaseNotesMaker
                               let category = Categorize(issue.Labels)
                               where !String.IsNullOrEmpty(category)
                               group issue by category into g
+                              orderby g.Key descending
                               select g;
 
             Console.WriteLine(String.Format("Found ({0}) issues in {1}", issueGroups.Sum(g => g.Count()), milestone.Title));
