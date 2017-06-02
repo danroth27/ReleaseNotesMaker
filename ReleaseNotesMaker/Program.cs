@@ -418,7 +418,7 @@ namespace ReleaseNotesMaker
         {
             if (labels.Any(l => l.Name.Contains("Done") || l.Name.Contains("closed-fixed")))
             {
-                if (labels.Any(l => l.Name.Contains("bug") || l.Name.Contains("type-bug")))
+                if (labels.Any(l => l.Name.Contains("bug")))
                 {
                     return "Bugs Fixed";
                 }
