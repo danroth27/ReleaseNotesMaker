@@ -148,7 +148,14 @@ namespace ReleaseNotesMaker
                 "libuv-build",
                 "KoreBuild",
                 "UserSecrets",
-                "Testing"
+                "Testing",
+                "BuildTools",
+                "Performance",
+                "RazorTooling",
+                "PlatformAbstractions",
+                "EntityFramework.Tools",
+                "UserSecrets",
+                "Signing"
             };
 
         private static bool SkipRepo(Repository repo)
@@ -383,7 +390,7 @@ namespace ReleaseNotesMaker
             }
             sb.AppendLine();
             sb.AppendLine("### <a name=\"breaking-changes\"></a>Breaking Changes");
-            sb.AppendLine(String.Format("- For a list of the breaking changes for this release please refer to the issues in the [Announcements](https://github.com/aspnet/announcements/issues?q=is%3Aissue+milestone%3A1.0.0-{0}) repo.", milestone.ToLower()));
+            sb.AppendLine(String.Format("- For a list of the breaking changes for this release please refer to the issues in the [Announcements](https://github.com/aspnet/announcements/issues?q=is%3Aissue+milestone%3A{0}) repo.", milestone.ToLower()));
             sb.AppendLine();
             sb.AppendLine("### <a name=\"known-issues\"></a>Known Issues");
             foreach (var knownIssue in knownIssues)
