@@ -384,7 +384,8 @@ namespace ReleaseNotesMaker
             sb.AppendLine(String.Format("We are pleased to [announce](http://blogs.msdn.com/webdev) the release of ASP.NET Core {0}!", milestone));
             sb.AppendLine();
             sb.AppendLine(String.Format("You can find details on the new features and bug fixes in {0} for the following components on their corresponding release pages:", milestone));
-            foreach (var release in releases.OrderBy(release => release.Key))
+            var releasesWithIssues = releases.Where(release => !String.IsNullOrWhiteSpace(release.Value.Body));
+            foreach (var release in releasesWithIssues.OrderBy(release => release.Key))
             {
                 sb.AppendLine(String.Format("- [{0}]({1})", release.Key, release.Value.HtmlUrl));
             }
