@@ -10,6 +10,7 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Octokit;
 using System.Globalization;
+using System.Net;
 
 namespace ReleaseNotesMaker
 {
@@ -26,21 +27,28 @@ namespace ReleaseNotesMaker
             }
 
             string repoURL = args[0];
-            string milestone = args[1];
+            string tagName = args[1];
+            string milestone = tagName;
             bool publish = false;
 
-            if (args.Length > 2 && args[2] == "--publish")
+            if (args.Length > 2)
             {
-                publish = true;
+                publish = args.Last() == "--publish";
+                
+                if (!args[2].StartsWith("-"))
+                {
+                    milestone = args[2];
+                }
             }
 
             string[] repoUrlSegments = repoURL.Split('/');
-            if (repoUrlSegments.Length > 2)
+            if (repoUrlSegments.Length != 2)
             {
                 DisplayHelp();
                 return 1;
             }
 
+            ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
             client = new GitHubClient(new ProductHeaderValue("ReleaseNotesMaker"));
             AddClientCredentials(client);
 
@@ -49,18 +57,11 @@ namespace ReleaseNotesMaker
 
             try
             {
-                if (repoName != null)
-                {
-                    PublishReleaseForMilestone(owner, repoName, milestone, true).Wait();
-                }
-                else
-                {
-                    PublishReleasesForMilestone(owner, milestone, publish).Wait();
-                }
+                PublishReleaseForMilestone(owner, repoName, tagName, milestone, publish).Wait();
             }
             catch (Exception ex)
             {
-                Console.WriteLine(ex);
+                Console.WriteLine(ex.Message);
                 return 1;
             }
 
@@ -69,9 +70,9 @@ namespace ReleaseNotesMaker
 
         private static void DisplayHelp()
         {
-            Console.WriteLine("Usage: [repoURL] [milestone]");
+            Console.WriteLine("Usage: [repoURL] [tag] [milestone?] [--publish]");
             Console.WriteLine("Sample:");
-            Console.WriteLine("{0}.exe signalr/signalr 2.1.1", typeof(Program).Assembly.GetName().Name);
+            Console.WriteLine("{0}.exe aspnet/signalr 2.1.1", typeof(Program).Assembly.GetName().Name);
         }
 
         private static void AddClientCredentials(GitHubClient client)
@@ -90,79 +91,6 @@ namespace ReleaseNotesMaker
             }
         }
 
-        private static async Task<IDictionary<string, Release>> PublishReleasesForMilestone(string org, string milestone, bool publish)
-        {
-            var repos = await client.Repository.GetAllForOrg(org);
-            Console.WriteLine("Found ({0}) repositories in {1}", repos.Count, org);
-            var releases = new Dictionary<string, Release>();
-            foreach (var repo in repos.Where(repo => !repo.Fork && !repo.Private))
-            {
-                if (SkipRepo(repo))
-                {
-                    Console.WriteLine("Skipping {0}", repo.Name);
-                    continue;
-                }
-
-                Release release = await PublishReleaseForMilestone(repo.Owner.Login, repo.Name, milestone, publish);
-                if (release != null)
-                {
-                    releases.Add(repo.Name, release);
-                }
-            }
-
-            if (!releases.Values.Any(release => release.Draft))
-            {
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine("All {0} {1} releases are now public!", org, milestone);
-                Console.ResetColor();
-            }
-            else
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine("Not all {0} {1} releases are public.", org, milestone);
-                Console.ResetColor();
-            }
-
-            Repository homeRepo = repos.First(repo => repo.Name == "Home");
-            var knownIssues = await GetKnownIssues(org, milestone);
-            Release rollupRelease = await PublishRollupRelease(homeRepo.Owner.Login, homeRepo.Name, "dev", milestone, releases, knownIssues, publish);
-            releases.Add(homeRepo.Name, rollupRelease);
-
-            return releases;
-        }
-
-        private static string[] SKIP_REPOS = new string[]
-            {
-                "dnx",
-                "Universe",
-                "MusicStore",
-                "Entropy",
-                "Coherence",
-                "aspnet-docker",
-                "Docs",
-                "ServerTests",
-                "Announcements",
-                "EntityFramework.Docs",
-                "benchmarks",
-                "DnxTools",
-                "libuv-build",
-                "KoreBuild",
-                "UserSecrets",
-                "Testing",
-                "BuildTools",
-                "Performance",
-                "RazorTooling",
-                "PlatformAbstractions",
-                "EntityFramework.Tools",
-                "UserSecrets",
-                "Signing"
-            };
-
-        private static bool SkipRepo(Repository repo)
-        {
-            return SKIP_REPOS.Contains(repo.Name);
-        }
-
         private static async Task<IEnumerable<Issue>> GetKnownIssues(string owner, string milestone)
         {
             var issueRequest = new RepositoryIssueRequest() { Labels = { "release-note" }, State = ItemStateFilter.Open };
@@ -171,28 +99,37 @@ namespace ReleaseNotesMaker
         }
 
 
-        private static async Task<Release> PublishReleaseForMilestone(string owner, string repoName, string milestone, bool publish)
+        private static async Task<Release> PublishReleaseForMilestone(string owner, string repoName, string tagName, string milestone, bool publish)
         {
             Console.WriteLine("{0}/{1}", owner, repoName);
-
-            var milestones = await GetMilestonesForRepository(owner, repoName);
-            Milestone matchingMilestone = milestones.FirstOrDefault(m => m.Title.EndsWith(milestone.ToLower()));
+ 
+            Milestone matchingMilestone = await GetMilestone(owner, repoName, milestone);
+            if (matchingMilestone == null)
+            {
+                throw new InvalidOperationException($"Milestone {milestone} not found in repo {owner}/{repoName}");
+            }
 
             Release release = null;
             if (matchingMilestone != null)
             {
                 string releaseNotes = await BuildReleaseNotesForMilestone(owner, repoName, matchingMilestone);
-                string releaseName = matchingMilestone.Title;
-                release = await CreateOrUpdateRelease(owner, repoName, releaseName, "rel/" + releaseName, releaseNotes, publish);
+                string releaseName = GetReleaseName(tagName);
+                release = await CreateOrUpdateRelease(owner, repoName, tagName, releaseName, releaseNotes, publish);
             }
             return release;
         }
 
-        private static async Task<Release> PublishRollupRelease(string owner, string repoName, string branch, string milestone, IDictionary<string, Release> releases, IEnumerable<Issue> knownIssues, bool publish)
+        private static string GetReleaseName(string tagName)
+        {
+            var suffix = "-final";
+            return tagName.EndsWith(suffix) ? tagName.Substring(0, tagName.Length - suffix.Length) : tagName;
+        }
+
+        private static async Task<Release> PublishRollupRelease(string owner, string repoName, string tagName, string milestone, IDictionary<string, Release> releases, IEnumerable<Issue> knownIssues, bool publish)
         {
             Console.Write("{0}/{1}", owner, repoName);
             string rollupReleaseNotes = BuildRollupReleaseNotes(milestone, releases, knownIssues);
-            Release rollupRelease = await CreateOrUpdateRelease(owner, repoName, milestone, branch, rollupReleaseNotes, publish);
+            Release rollupRelease = await CreateOrUpdateRelease(owner, repoName, tagName, milestone, rollupReleaseNotes, publish);
             return rollupRelease;
         }
 
@@ -201,15 +138,20 @@ namespace ReleaseNotesMaker
             return releaseName.StartsWith("0") || releaseName.Contains("-");
         }
 
-        private static async Task<Release> CreateOrUpdateRelease(string owner, string repoName, string releaseName, string branch, string releaseBody, bool publish)
+        private static async Task<Release> CreateOrUpdateRelease(
+            string owner, 
+            string repoName, 
+            string tagName,
+            string releaseName, 
+            string releaseBody, 
+            bool publish)
         {
             Release release = await GetRelease(owner, repoName, releaseName);
             bool isPrerelease = IsPrerelease(releaseName);
-            string tagName = repoName == "Home" ? releaseName : "rel/" + releaseName;
 
             if (release != null)
             {
-                Console.WriteLine("{0} {1} {2} release already exists ({3})", repoName, release.Name, release.Draft ? "draft" : "public", release.HtmlUrl);
+                Console.WriteLine($"{repoName} {release.Name} {(release.Draft ? "draft" : "public")} release already exists ({release.HtmlUrl})");
 
                 if (release.Body != releaseBody || release.Prerelease != isPrerelease || release.TagName != tagName)
                 {
@@ -218,30 +160,25 @@ namespace ReleaseNotesMaker
                         release = await UpdateReleaseDescription(owner, repoName, release, releaseBody, isPrerelease, tagName);
                     }
                 }
-
-                Console.WriteLine("{0} {1} release is up to date.", repoName, release.Name);
-                if (release.Draft)
-                { 
-                    if (publish || ShouldPublishRelease(repoName, releaseName))
-                    {
-                        release = await PublishRelease(owner, repoName, release);
-                    }
-                }
                 else
                 {
-                    if (ShouldUnpublishRelease(repoName, releaseName))
-                    {
-                        release = await UnpublishRelease(owner, repoName, release);
-                    }
+                    Console.WriteLine("{0} {1} release is up to date.", repoName, release.Name);
+                }
+                
+                if (publish && release.Draft)
+                { 
+                    release = await PublishRelease(owner, repoName, release);
+                }
+
+                if (!publish && !release.Draft && ShouldUnpublishRelease(repoName, releaseName))
+                {
+                    release = await UnpublishRelease(owner, repoName, release);
                 }
             }
             else
             {
                 Console.WriteLine("{0} {1} release does not exist.", repoName, releaseName);
-                if (ShouldCreateDraftRelease(repoName, releaseName))
-                {
-                    release = await CreateDraftRelease(owner, repoName, "rel/" + releaseName, releaseName, branch, releaseBody, isPrerelease);
-                }
+                release = await CreateRelease(owner, repoName, tagName, releaseName, releaseBody, isPrerelease, publish);
             }
             return release;
         }
@@ -285,56 +222,58 @@ namespace ReleaseNotesMaker
             return String.Compare(yesNo, "Y", true) == 0;
         }
 
-        private static async Task<Release> CreateDraftRelease(string owner, string repoName, string tagName, string releaseName, string branch, string description, bool isPrerelease)
+        private static async Task<Release> CreateRelease(string owner, string repoName, string tagName, string releaseName, string description, bool isPrerelease, bool publish)
         {
             var newRelease = new NewRelease(tagName)
             {
-                TargetCommitish = branch,
                 Name = releaseName,
                 Body = description,
                 Prerelease = isPrerelease,
-                Draft = true
+                Draft = !publish
             };
 
-            return await client.Repository.Release.Create(owner, repoName, newRelease);
+            var release = await client.Repository.Release.Create(owner, repoName, newRelease);
+            Console.WriteLine($"Created {(publish ? "public" : "draft")} release {releaseName}: {release.HtmlUrl}");
+            return release;
         }
 
         private static async Task<Release> UpdateReleaseDescription(string owner, string repoName, Release release, string description, bool isPrelease, string tagName)
         {
-            return await UpdateRelease(owner, repoName, release, update => {
+            var updatedRelease = await UpdateRelease(owner, repoName, release, update => {
                 update.Body = description;
                 update.Prerelease = isPrelease;
                 update.TagName = tagName;
             });
+            Console.WriteLine($"Release updated: {updatedRelease.HtmlUrl}");
+            return updatedRelease;
         }
 
         private static async Task<Release> PublishRelease(string owner, string repoName, Release release)
         {
-            return await UpdateRelease(owner, repoName, release, update => update.Draft = false);
+            var updatedRelease = await UpdateRelease(owner, repoName, release, update => update.Draft = false);
+            Console.WriteLine($"Release published: {updatedRelease.HtmlUrl}");
+            return updatedRelease;
         }
 
         private static async Task<Release> UnpublishRelease(string owner, string repoName, Release release)
         {
-            return await UpdateRelease(owner, repoName, release, update => update.Draft = true);
+            var updatedRelease = await UpdateRelease(owner, repoName, release, update => update.Draft = true);
+            Console.WriteLine($"Release unpublished: {updatedRelease.HtmlUrl}");
+            return updatedRelease;
         }
 
         private static async Task<Release> UpdateRelease(string owner, string repoName, Release release, Action<ReleaseUpdate> updateRelease)
         {
             ReleaseUpdate releaseUpdate = release.ToUpdate();
             updateRelease(releaseUpdate);
-            return await client.Repository.Release.Edit(owner, repoName, release.Id, releaseUpdate);
+            var updatedRelease = await client.Repository.Release.Edit(owner, repoName, release.Id, releaseUpdate);
+            return updatedRelease;
         }
 
-        private static async Task<List<Milestone>> GetMilestonesForRepository(string owner, string repoName)
+        private static async Task<Milestone> GetMilestone(string owner, string repoName, string milestone)
         {
-            var openMilestones = await client.Issue.Milestone.GetAllForRepository(owner, repoName);
-            List<Milestone> milestones = new List<Milestone>(openMilestones);
-
-            var milestoneRequest = new MilestoneRequest() { State = ItemStateFilter.Closed };
-            var closedMilestones = await client.Issue.Milestone.GetAllForRepository(owner, repoName, milestoneRequest);
-            milestones.AddRange(closedMilestones);
-
-            return milestones;
+            var milestones = await client.Issue.Milestone.GetAllForRepository(owner, repoName, new MilestoneRequest { State = ItemStateFilter.All });
+            return milestones.FirstOrDefault(m => m.Title.EndsWith(milestone.ToLower())); ;
         }
 
         private static async Task<string> BuildReleaseNotesForMilestone(string owner, string repoName, Milestone milestone)
